@@ -16,7 +16,7 @@ var DomainSpecs = []catalog.DomainSpec{
 	{
 		Key:   "boxes",
 		Tags:  []string{"Boxes"},
-		Blurb: "HEY mail boxes: the Imbox, Feed, Paper Trail, Reply Later, Set Aside and Bubble Up stacks, box groups and designations, and incremental posting changes.",
+		Blurb: "HEY mail boxes: the Imbox, The Feed, the Paper Trail, Reply Later, Set Aside and Bubble Up, box groups and designations, and incremental posting changes.",
 	},
 	{
 		Key:   "search",
@@ -26,22 +26,22 @@ var DomainSpecs = []catalog.DomainSpec{
 	{
 		Key:   "threads",
 		Tags:  []string{"Topics", "Entries", "Messages"},
-		Blurb: "HEY email threads: topics and their entries, renaming a thread, full message content, replies and forwards, drafts, and triage (trash, spam, restore, move). create_message, create_reply and update_message only ever save drafts: they never send or schedule mail, and a request to send, schedule or triage in the same call is refused. Updating a scheduled draft clears its schedule. There is no send action; a person sends a draft from HEY or with `hey draft send <id>`.",
+		Blurb: "HEY email threads: topics and their entries, renaming a thread, full message content, replies and forwards, drafts, and triage (trash, spam, restore, move). create_message, create_reply and update_message only ever save drafts: they never send or schedule mail, and a request to send, schedule or triage in the same call is refused. Updating a scheduled draft clears its schedule. The person can have a draft shown or revised as they like. When they ask to send it, call hey_send's send_draft at once where hey_send is listed: its confirmation shows them what goes out, so don't show the draft again or ask them again first. Where hey_send isn't listed, the person sends the draft from its page in HEY (app_url) or with `hey draft send <id>`.",
 	},
 	{
 		Key:   "contacts",
 		Tags:  []string{"Contacts"},
-		Blurb: "HEY contacts and the Screener: contact records and notes, bundling, and clearance (screening) decisions.",
+		Blurb: "HEY contacts and The Screener: contact records and notes, bundling, and clearance (screening) decisions.",
 	},
 	{
 		Key:   "todos",
 		Tags:  []string{"Calendar Todos"},
-		Blurb: "HEY Calendar todos: create, update, complete, uncomplete, and delete. Read existing todos through the calendar domain's get_calendar_recordings.",
+		Blurb: "HEY Calendar to-dos: create, update, complete, uncomplete, and delete. Read existing to-dos through the calendar domain's get_calendar_recordings.",
 	},
 	{
 		Key:   "calendar",
 		Tags:  []string{"Calendars"},
-		Blurb: "HEY Calendars: list calendars, read their recordings (todos and events — the todo read path), and toggle calendar visibility.",
+		Blurb: "HEY Calendars: list calendars, read their recordings (to-dos and events — the to-do read path), and toggle calendar visibility.",
 	},
 	{
 		Key:   "identity",
