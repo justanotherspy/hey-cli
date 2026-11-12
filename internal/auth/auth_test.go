@@ -354,47 +354,49 @@ func TestWaitForCallbackContextCancellation(t *testing.T) {
 	}
 }
 
-func TestLoginWithCookieAuthenticateAndLogout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("authentication should not make an HTTP request")
-	}))
-	defer server.Close()
+type authRequestTransport func(*http.Request) (*http.Response, error)
 
+func (f authRequestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestObsoleteCookieNeverAuthenticates(t *testing.T) {
 	t.Setenv("HEY_TOKEN", "")
-	mgr := testManager(t, server)
-	if err := mgr.LoginWithCookie("cookie-value"); err != nil {
-		t.Fatalf("LoginWithCookie: %v", err)
+	t.Setenv("HEY_NO_KEYRING", "1")
+	requests := 0
+	client := &http.Client{Transport: authRequestTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("obsolete credentials must not make a request")
+	})}
+	mgr := NewManager("https://mail.example.test", client, t.TempDir())
+	if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{SessionCookie: "obsolete-cookie", OAuthType: "cookie", ExpiresAt: 1}); err != nil {
+		t.Fatal(err)
 	}
-	if !mgr.IsAuthenticated() {
-		t.Fatal("IsAuthenticated = false after cookie login")
+	if authenticated, err := mgr.AuthenticationStatus(); authenticated || err != nil {
+		t.Fatalf("status = %v, %v", authenticated, err)
 	}
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.test/messages", nil)
-	if err := mgr.AuthenticateRequest(t.Context(), req); err != nil {
-		t.Fatalf("AuthenticateRequest: %v", err)
+	for _, reload := range []bool{false, true} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://mail.example.test", nil)
+		err := mgr.authenticateRequest(t.Context(), req, reload)
+		if err == nil || !strings.Contains(err.Error(), "sign in again") {
+			t.Fatalf("authenticate (reload=%v) = %v", reload, err)
+		}
+		if req.Header.Get("Cookie") != "" || req.Header.Get("Authorization") != "" {
+			t.Error("obsolete cookie reached authentication headers")
+		}
 	}
-	if got := req.Header.Get("Cookie"); got != "__Host-session_token=cookie-value; session_token=cookie-value" {
-		t.Errorf("Cookie = %q, want the session cookie under both names", got)
+	if token, err := mgr.AccessToken(t.Context()); token != "" || err == nil {
+		t.Fatal("obsolete cookie became a token")
 	}
-	if got := req.Header.Get("Authorization"); got != "" {
-		t.Errorf("Authorization = %q, want empty for cookie auth", got)
-	}
-
-	token, err := mgr.AccessToken(t.Context())
-	if err != nil {
-		t.Fatalf("AccessToken: %v", err)
-	}
-	if token != "cookie-value" {
-		t.Errorf("AccessToken = %q, want cookie fallback", token)
-	}
-	if err := mgr.Refresh(t.Context()); err != nil {
-		t.Fatalf("cookie Refresh: %v", err)
+	if err := mgr.Refresh(t.Context()); err == nil {
+		t.Fatal("obsolete cookie refresh succeeded")
 	}
 	if err := mgr.Logout(); err != nil {
-		t.Fatalf("Logout: %v", err)
+		t.Fatal(err)
 	}
-	if mgr.IsAuthenticated() {
-		t.Fatal("IsAuthenticated = true after logout")
+	if _, err := mgr.GetStore().Load(mgr.CredentialKey()); !errors.Is(err, ErrCredentialsNotFound) {
+		t.Fatalf("obsolete credential survived logout: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("obsolete credential made %d network requests", requests)
 	}
 }
 
@@ -405,8 +407,8 @@ func TestAuthenticateRequestBearerPrecedence(t *testing.T) {
 	t.Run("environment", func(t *testing.T) {
 		t.Setenv("HEY_TOKEN", "environment-token")
 		mgr := testManager(t, server)
-		if err := mgr.LoginWithCookie("stored-cookie"); err != nil {
-			t.Fatalf("LoginWithCookie: %v", err)
+		if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{SessionCookie: "stored-cookie", OAuthType: "cookie"}); err != nil {
+			t.Fatalf("store legacy fixture: %v", err)
 		}
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.test", nil)
 		if err := mgr.AuthenticateRequest(t.Context(), req); err != nil {
@@ -492,7 +494,7 @@ func TestMissingCredentialsDoNotModifyRequest(t *testing.T) {
 		want  string
 	}{
 		{name: "not logged in", want: "not authenticated"},
-		{name: "empty credentials", creds: &Credentials{}, want: "no access token or session cookie"},
+		{name: "empty credentials", creds: &Credentials{}, want: "no access token"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -562,6 +564,64 @@ func TestTokenRefreshOnExpiry(t *testing.T) {
 	}
 	if refreshCalls != 1 {
 		t.Errorf("refresh calls = %d, want 1", refreshCalls)
+	}
+}
+
+func TestRefreshOnlyCredentialsRecoverAccessToken(t *testing.T) {
+	for _, stored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stored=%v", stored), func(t *testing.T) {
+			t.Setenv("HEY_TOKEN", "")
+			t.Setenv("HEY_NO_KEYRING", "1")
+			requests := 0
+			client := &http.Client{Transport: authRequestTransport(func(r *http.Request) (*http.Response, error) {
+				requests++
+				if r.URL.Path != "/oauth/tokens" || r.Header.Get("Cookie") != "" {
+					t.Error("refresh used an unexpected route or cookie")
+				}
+				if err := r.ParseForm(); err != nil || r.Form.Get("refresh_token") != "valid-refresh" {
+					t.Error("refresh did not use the stored grant")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"access_token":"renewed-token","refresh_token":"renewed-refresh","expires_in":3600}`))}, nil
+			})}
+			mgr := NewManager("https://mail.example.test", client, t.TempDir())
+			if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{RefreshToken: "valid-refresh", ExpiresAt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			getToken := mgr.AccessToken
+			if stored {
+				getToken = mgr.StoredAccessToken
+			}
+			token, err := getToken(t.Context())
+			if err != nil || token != "renewed-token" || requests != 1 {
+				t.Fatalf("refresh-only recovery: error=%v, requests=%d, recovered=%v", err, requests, token == "renewed-token")
+			}
+		})
+	}
+}
+
+func TestRefreshOnlyRateLimitNeverAuthenticatesAnEmptyToken(t *testing.T) {
+	t.Setenv("HEY_TOKEN", "")
+	t.Setenv("HEY_NO_KEYRING", "1")
+	requests := 0
+	client := &http.Client{Transport: authRequestTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Content-Type": {"application/json"}, "Retry-After": {"60"}}, Body: io.NopCloser(strings.NewReader(`{"error":"rate_limit_exceeded"}`))}, nil
+	})}
+	mgr := NewManager("https://mail.example.test", client, t.TempDir())
+	if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{RefreshToken: "valid-refresh", SessionCookie: "obsolete-cookie", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, getToken := range []func(context.Context) (string, error){mgr.AccessToken, mgr.StoredAccessToken} {
+		if token, err := getToken(t.Context()); token != "" || err == nil || !strings.Contains(err.Error(), "rate-limiting") {
+			t.Fatal("refresh-only grant did not retain its rate-limit failure")
+		}
+	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://mail.example.test/boxes.json", nil)
+	if err := mgr.AuthenticateRequest(t.Context(), req); err == nil || !strings.Contains(err.Error(), "rate-limiting") {
+		t.Fatal("request authentication did not retain its rate-limit failure")
+	}
+	if req.Header.Get("Authorization") != "" || req.Header.Get("Cookie") != "" || requests != 1 {
+		t.Fatalf("rate-limit hold reached authentication headers or retried: calls=%d", requests)
 	}
 }
 
@@ -1110,7 +1170,7 @@ func TestTheClearedCredentialHookRunsOnlyWhenTheCredentialWent(t *testing.T) {
 					t.Fatalf("stored credential: %v", err)
 				}
 			}
-			kept := remaining.AccessToken != "" || remaining.SessionCookie != ""
+			kept := remaining.AccessToken != ""
 			if kept != (tt.wantRuns == 0) {
 				t.Errorf("usable credential kept = %v; the hook has to run exactly when it is gone", kept)
 			}
@@ -1494,5 +1554,42 @@ func TestNotLoggedInHintInsideCodexSandbox(t *testing.T) {
 				t.Errorf("hint = %q, want it to contain %q", classified.Hint, tt.want)
 			}
 		})
+	}
+}
+
+// A profile signed in again at another server by another process: a running manager
+// must not adopt that token and send it to its own server.
+func TestRefreshRefusesAProfileTokenAnotherServerIssued(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	t.Setenv("HEY_TOKEN", "")
+	mgr := testManager(t, server)
+	mgr.UseProfile("work")
+	// The running manager has its own server's sign-in cached.
+	if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{AccessToken: "ours", RefreshToken: "our-refresh", TokenEndpoint: server.URL + "/oauth/tokens"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if token, err := mgr.AccessToken(t.Context()); err != nil || token != "ours" {
+		t.Fatalf("AccessToken = %q, %v", token, err)
+	}
+	if err := mgr.GetStore().Save(mgr.CredentialKey(), &Credentials{AccessToken: "other-server", RefreshToken: "other-refresh", TokenEndpoint: "https://other.example/oauth/tokens"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	stale := &Credentials{AccessToken: "ours", RefreshToken: "our-refresh", TokenEndpoint: server.URL + "/oauth/tokens"}
+	err := mgr.refreshLocked(t.Context(), stale)
+	if err == nil || !strings.Contains(err.Error(), "was issued by https://other.example/oauth/tokens") {
+		t.Errorf("refreshLocked = %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("requests = %d, want none", calls)
+	}
+	if token, err := mgr.AccessToken(t.Context()); err == nil {
+		t.Errorf("AccessToken after the refusal = %q, want an error", token)
 	}
 }

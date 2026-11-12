@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/basecamp/hey-cli/internal/apierr"
+	"github.com/basecamp/hey-cli/internal/config"
 )
 
 // Built-in OAuth client ID for the CLI app.
@@ -30,8 +31,13 @@ const callbackListenAddr = "127.0.0.1:0"
 type Manager struct {
 	baseURL string
 	// storeKey is where the credential lives in the store: the origin for the CLI's
-	// own, "mcp::" and the origin for hey mcp's (mcp.go).
+	// own, "mcp::" and the origin for hey mcp's (mcp.go), and under a profile
+	// "profile:<name>" and "mcp:profile:<name>" (UseProfile).
 	storeKey string
+	// mcp marks hey mcp's manager, whose credential is kept apart from the CLI's.
+	mcp bool
+	// profile is the profile this manager's credential belongs to, "" for none.
+	profile string
 	// clientID is the OAuth client this manager signs in and refreshes as.
 	clientID string
 	// scope is what a sign-in asks for. Empty asks for none, which HEY grants the
@@ -125,7 +131,16 @@ func cloneCredentials(creds *Credentials) *Credentials {
 // AccessToken returns a valid access token, refreshing if needed.
 // If HEY_TOKEN env var is set, the CLI's manager uses it directly.
 func (m *Manager) AccessToken(ctx context.Context) (string, error) {
-	if token := m.envToken(); token != "" {
+	return m.accessToken(ctx, true)
+}
+
+// StoredAccessToken returns only the stored bearer token, ignoring HEY_TOKEN.
+func (m *Manager) StoredAccessToken(ctx context.Context) (string, error) {
+	return m.accessToken(ctx, false)
+}
+
+func (m *Manager) accessToken(ctx context.Context, useEnv bool) (string, error) {
+	if token := m.envToken(); useEnv && token != "" {
 		return token, nil
 	}
 
@@ -137,8 +152,12 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		return "", credentialLoadError(err)
 	}
 
-	// Check if token is expired (with 5-minute buffer)
-	if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300 {
+	if creds.AccessToken == "" && creds.RefreshToken == "" {
+		return "", missingBearer(creds)
+	}
+
+	// Recover a missing access token, or refresh an expired one (with a 5-minute buffer).
+	if creds.AccessToken == "" || (creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300) {
 		if err = m.refreshLocked(ctx, creds); err != nil {
 			return "", err
 		}
@@ -152,16 +171,11 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 		return creds.AccessToken, nil
 	}
 
-	// Fall back to session cookie for cookie-based auth.
-	if creds.SessionCookie != "" {
-		return creds.SessionCookie, nil
-	}
-
-	return "", errNoCredential("no access token or session cookie available", nil)
+	return "", missingBearer(creds)
 }
 
 // AuthenticateRequest sets the appropriate auth header on an HTTP request.
-// Uses Bearer token if available, otherwise falls back to session cookie.
+// Uses only bearer tokens; obsolete browser cookies are never sent.
 func (m *Manager) AuthenticateRequest(ctx context.Context, req *http.Request) error {
 	return m.authenticateRequest(ctx, req, false)
 }
@@ -202,9 +216,9 @@ func (m *Manager) authenticateRequest(ctx context.Context, req *http.Request, re
 		return credentialLoadError(err)
 	}
 
-	if creds.AccessToken != "" {
-		// Auto-refresh if needed
-		if creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300 {
+	if creds.AccessToken != "" || creds.RefreshToken != "" {
+		// Recover a missing access token as well as an expired one.
+		if creds.AccessToken == "" || (creds.ExpiresAt > 0 && time.Now().Unix() >= creds.ExpiresAt-300) {
 			if err = m.refreshLocked(ctx, creds); err != nil {
 				return err
 			}
@@ -217,12 +231,7 @@ func (m *Manager) authenticateRequest(ctx context.Context, req *http.Request, re
 		return nil
 	}
 
-	if creds.SessionCookie != "" {
-		req.Header.Set("Cookie", sessionCookieHeader(creds.SessionCookie))
-		return nil
-	}
-
-	return errNoCredential("no access token or session cookie available", nil)
+	return missingBearer(creds)
 }
 
 // AuthenticationStatus reports whether usable credentials exist. A missing
@@ -243,7 +252,7 @@ func (m *Manager) AuthenticationStatus() (bool, error) {
 	if err != nil {
 		return false, credentialLoadError(err)
 	}
-	return creds.AccessToken != "" || creds.SessionCookie != "", nil
+	return creds.AccessToken != "" || creds.RefreshToken != "", nil
 }
 
 // IsAuthenticated reports whether usable credentials exist. Callers that need
@@ -373,14 +382,9 @@ func (m *Manager) LoginWithToken(token string) error {
 		AccessToken: token,
 		OAuthType:   "token",
 	}
-	return m.saveCredentials(creds)
-}
-
-// LoginWithCookie stores a session cookie.
-func (m *Manager) LoginWithCookie(cookie string) error {
-	creds := &Credentials{
-		SessionCookie: cookie,
-		OAuthType:     "cookie",
+	if m.profile != "" {
+		// Recorded so checkProfileIssuer knows which server a profile's token is for.
+		creds.TokenEndpoint = m.baseURL + "/oauth/tokens"
 	}
 	return m.saveCredentials(creds)
 }
@@ -431,12 +435,33 @@ func (m *Manager) reloadCredentialsLocked() (*Credentials, error) {
 	if err == nil {
 		err = m.checkPinnedGrant(creds)
 	}
+	if err == nil {
+		err = m.checkProfileIssuer(creds)
+	}
 	if err != nil {
 		m.cachedCredentials = nil
 		return nil, err
 	}
 	m.cachedCredentials = cloneCredentials(creds)
 	return cloneCredentials(creds), nil
+}
+
+// checkProfileIssuer refuses a profile's credential issued by another server than the
+// one this manager talks to. A profile's credential is keyed by its name, not by a
+// server, so an edited base_url would otherwise send it somewhere new; the key by
+// origin that the top-level credential uses makes this check needless there.
+func (m *Manager) checkProfileIssuer(creds *Credentials) error {
+	if m.profile == "" || creds.TokenEndpoint == "" {
+		return nil
+	}
+	issuer, issuerErr := config.Origin(creds.TokenEndpoint)
+	server, serverErr := config.Origin(m.baseURL)
+	if issuerErr == nil && serverErr == nil && issuer == server {
+		return nil
+	}
+	err := apierr.ErrAuth(fmt.Sprintf("profile %q's sign-in was issued by %s, not %s", m.profile, creds.TokenEndpoint, m.baseURL))
+	err.Hint = "Run: " + m.LoginCommand()
+	return err
 }
 
 func (m *Manager) saveCredentials(creds *Credentials) error {
@@ -476,21 +501,22 @@ func (m *Manager) refreshLocked(ctx context.Context, creds *Credentials) error {
 		m.cachedCredentials = nil
 		return pinErr
 	}
+	// Another process may have signed the profile in at another server since this one
+	// loaded it.
+	if issuerErr := m.checkProfileIssuer(stored); issuerErr != nil {
+		m.cachedCredentials = nil
+		return issuerErr
+	}
 	m.cachedCredentials = cloneCredentials(stored)
-	changed := stored.AccessToken != creds.AccessToken || stored.SessionCookie != creds.SessionCookie
-	if changed && (stored.AccessToken != "" || stored.SessionCookie != "") {
+	changed := stored.AccessToken != creds.AccessToken
+	if changed && stored.AccessToken != "" {
 		return nil
 	}
 	creds = cloneCredentials(stored)
-	if creds.AccessToken == "" && creds.RefreshToken == "" && creds.SessionCookie == "" {
-		return errNoCredential("stored credentials are signed out", nil)
+	if creds.AccessToken == "" && creds.RefreshToken == "" {
+		return missingBearer(creds)
 	}
 
-	// Cookie-based auth has nothing to refresh. The fresh read above still lets
-	// a 401 adopt a cookie another process stored before the SDK retries.
-	if creds.RefreshToken == "" && creds.SessionCookie != "" {
-		return nil
-	}
 	if creds.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
 	}
@@ -504,7 +530,7 @@ func (m *Manager) refreshLocked(ctx context.Context, creds *Credentials) error {
 		// Asking again inside the rate limit cannot get through. A token that has
 		// not actually expired is still good, so carry on with it: the SDK's own
 		// retry after a 401 costs one request at most.
-		if creds.ExpiresAt > time.Now().Unix() {
+		if creds.AccessToken != "" && creds.ExpiresAt > time.Now().Unix() {
 			return nil
 		}
 		return errRefreshHeld(until)
@@ -753,9 +779,51 @@ func (m *Manager) GetStore() *Store {
 }
 
 // CredentialKey returns the credential's storage key: the base URL for the CLI's own
-// credential, prefixed for hey mcp's (mcp.go).
+// credential, prefixed for hey mcp's (mcp.go), or the profile's (UseProfile).
 func (m *Manager) CredentialKey() string {
 	return m.storeKey
+}
+
+// ProfileCredentialKey is the key a named profile's credential is stored under,
+// basecamp-cli's "profile:<name>" (internal/auth/auth.go at 48b01aaf).
+func ProfileCredentialKey(profile string) string { return "profile:" + profile }
+
+// MCPProfileCredentialKey is the key of hey mcp's credential under a profile, kept
+// apart from the profile's own as "mcp::<origin>" is from the origin's.
+func MCPProfileCredentialKey(profile string) string { return "mcp:" + ProfileCredentialKey(profile) }
+
+// UseProfile keys this manager's credential by profile rather than by origin, so two
+// profiles on one server hold two sign-ins and neither reads the other's.
+func (m *Manager) UseProfile(profile string) {
+	m.profile = profile
+	if m.mcp {
+		m.storeKey = MCPProfileCredentialKey(profile)
+	} else {
+		m.storeKey = ProfileCredentialKey(profile)
+	}
+}
+
+// LoginCommand is the command that signs this manager's credential in again:
+// addressed to its profile when there is one, since a bare login would store the new
+// credential under the top-level key instead. It is meant to be pasted, so the name is
+// shell-quoted.
+func (m *Manager) LoginCommand() string {
+	command := "hey auth login"
+	if m.mcp {
+		command += " --mcp"
+	}
+	if m.profile != "" {
+		command += " -P " + shellQuote(m.profile)
+	}
+	return command
+}
+
+// shellQuote quotes a word for a POSIX shell when it needs it.
+func shellQuote(word string) string {
+	if word != "" && strings.Trim(word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.") == "" {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 func (m *Manager) waitForCallback(ctx context.Context, expectedState, authURL string, listener net.Listener, opts LoginOptions) (string, error) {
@@ -850,11 +918,11 @@ func (m *Manager) waitForCallback(ctx context.Context, expectedState, authURL st
 	}
 }
 
-// sessionCookieHeader sends a browser session cookie under both of the names
-// HEY signs it with. Browsers signed in since HEY moved to __Host-session_token
-// hold that cookie; older ones hold session_token. The value's signature is
-// bound to its name, so HEY accepts it under one and ignores it under the other,
-// and stored cookies work whichever name they were copied from.
-func sessionCookieHeader(value string) string {
-	return "__Host-session_token=" + value + "; session_token=" + value
+// missingBearer recognizes old cookie-only records without treating their secrets
+// as tokens. Keeping the record readable also lets ordinary login/logout replace it.
+func missingBearer(creds *Credentials) error {
+	if creds.SessionCookie != "" {
+		return apierr.ErrAuth("browser session cookie authentication is no longer supported; sign in again with hey auth login")
+	}
+	return errNoCredential("no access token available", nil)
 }
