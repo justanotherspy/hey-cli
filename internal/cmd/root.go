@@ -134,6 +134,7 @@ func newRootCmd() *cobra.Command {
 			configDir := config.ConfigDir()
 			httpClient := &http.Client{Timeout: 30 * time.Second}
 			authMgr = auth.NewManager(cfg.BaseURL, httpClient, configDir)
+			authMgr.UseOAuthServer(cfg.OAuthIssuerURL, cfg.OAuthTokenURL)
 			if cfg.ActiveProfile != "" {
 				authMgr.UseProfile(cfg.ActiveProfile)
 			}
@@ -156,7 +157,7 @@ func newRootCmd() *cobra.Command {
 				migrateOldCredentials(configDir)
 			}
 
-			if commandUsesAccountScope(cmd) && !appEndpoint() {
+			if commandUsesAccountScope(cmd) && !appEndpoint() && !appGateUnmet {
 				authenticated, err := authMgr.AuthenticationStatus()
 				if err != nil {
 					return err
@@ -186,6 +187,11 @@ func newRootCmd() *cobra.Command {
 			// other bare `hey` prints help; the app lives at `hey tui`. A profile
 			// the HEY app answers needs no sign-in, so it never gets the wizard.
 			if appEndpoint() {
+				return cmd.Help()
+			}
+			if appGateUnmet {
+				refusal := noAppProfileError(cmd)
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n%s\n", refusal.Message, refusal.Hint)
 				return cmd.Help()
 			}
 			authenticated, err := authMgr.AuthenticationStatus()
