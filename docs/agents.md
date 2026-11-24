@@ -3,7 +3,7 @@
 hey-cli is built to be driven by an agent as readily as by a person: every command that returns
 data answers `--json`, the exit codes are stable (`hey help exit-codes`), and `hey commands --json`
 describes the whole surface. This page covers the two integrations that ship with it: an
-agent skill for Claude Code and Codex, and an MCP server.
+agent skill for Claude Code, Codex and Grok, and an MCP server.
 
 ## Agent skill and Claude Code plugin
 
@@ -15,6 +15,7 @@ manage the integrations on their own:
 ```bash
 hey setup claude    # install the skill and the hey@37signals plugin for Claude Code
 hey setup codex     # install the shared skill for Codex
+hey setup grok      # install the shared skill for Grok
 hey skill install   # install the skill only (~/.agents/skills/hey, linked for detected agents)
 hey setup agents             # non-interactive: skill + a single detected agent (the installer uses this)
 hey setup agents --remove    # remove HEY's managed skills and Claude Code plugin
@@ -22,16 +23,16 @@ hey doctor                   # check skill and plugin health per detected agent
 ```
 
 `hey setup agents` never prompts and never guesses: with several agents detected it installs
-the skill only and lists the `hey setup <agent>` choices. `HEY_SETUP_AGENT=claude|codex|all|none`
+the skill only and lists the `hey setup <agent>` choices. `HEY_SETUP_AGENT=claude|codex|grok|all|none`
 picks explicitly. `HEY_NONINTERACTIVE=1` disables interactive sign-in for harnesses that
 run hey under a pseudo-terminal. The installed skill is refreshed automatically the first
 time a new hey release runs.
 
-Codex discovers the shared `~/.agents/skills/hey` skill directly. hey-cli does
-not also copy it to `~/.codex/skills/hey`, which would make Codex list the same
-skill twice. Setup and version refresh remove that legacy path only when its
-ownership marker proves an older hey-cli created it; user-authored files are
-left untouched.
+Codex and Grok discover the shared `~/.agents/skills/hey` skill directly. hey-cli does
+not also copy it into their own skills directories (`~/.codex/skills/hey`, `~/.grok/skills/hey`):
+Codex would list the same skill twice, and either would be a second copy to keep current.
+Setup, `hey skill install` and version refresh remove such a copy only when its ownership
+marker proves an older hey-cli created it; user-authored files are left untouched.
 
 hey only ever writes skill directories it owns: each one it creates carries a
 `.managed-by-hey-cli` marker, and install, replacement and automatic refresh all refuse a
@@ -125,6 +126,16 @@ draft with 204 and a Location. Any other answer is reported as an error that say
 mail may have been sent, so check HEY before trying again. A save that fails with no
 answer from HEY (a dropped connection, a timeout, a 5xx) may still have been saved, and
 its error says to check Drafts before retrying.
+
+`hey_attach`'s `attach_file` attaches a file to a saved draft, after its body, and sends
+nothing. It takes the file's name, media type and bytes as `content_base64`, up to 18 MB,
+with an optional `sha256` of the bytes that must match or nothing is attached; HEY is asked
+nothing until the bytes check out. `hey mcp` reads a call of up to 32 MiB from its client,
+room for the largest file; a client that writes a larger one ends the session. The file goes to HEY as a direct upload, then into the
+draft with the rest of the draft as it was. A draft scheduled to send is refused (change it
+in HEY), and HEY itself refuses one in its undo window. An agent with a shell attaches a file on disk
+with `hey compose --draft --attach <path>` or `hey reply <thread-id> --draft --attach <path>`
+instead. `hey_attach` is served whenever `hey mcp` can write, never under `--read-only`.
 
 Delivery is one action in a tool of its own: `hey_send`'s `send_draft`, with the draft's
 id. Each call asks you to confirm the email in your MCP client (an MCP elicitation),

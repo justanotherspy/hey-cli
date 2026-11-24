@@ -12,13 +12,13 @@ buildGoModule.override { inherit go; } (finalAttrs: {
   pname = "hey";
   # Bumped by `make update-nix-hash VERSION=vX.Y.Z` before each stable
   # release; scripts/release.sh refuses to tag until it matches.
-  version = "1.13.1";
+  version = "1.14.0";
 
   src = lib.cleanSource ./..;
 
   # To update: run `make update-nix-hash` (Docker). It rewrites this quoted
   # value in place, so keep it a string literal rather than lib.fakeHash.
-  vendorHash = "sha256-UgMV3U4FFfz4wot6DY/E300FGYf0F4qy1hsXFxM+b74=";
+  vendorHash = "sha256-ngm3ftP+/f/7zDmcEsCNgwAJQP/csujU+NkkIKuMP9M=";
 
   subPackages = [ "cmd/hey" ];
 

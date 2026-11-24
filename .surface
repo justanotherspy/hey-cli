@@ -312,6 +312,7 @@ hey reply --message
 hey reply --message-html
 hey reply --replace-recipients
 hey reply --to
+hey restore
 hey screener
 hey screener approve
 hey screener approve --box
@@ -365,6 +366,7 @@ hey setup agents
 hey setup agents --remove
 hey setup claude
 hey setup codex
+hey setup grok
 hey setup omarchy
 hey setup omarchy --no-notify
 hey setup omarchy --notify
