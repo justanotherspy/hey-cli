@@ -2,7 +2,7 @@
 
 `hey tui` is the interactive app: Mail, Contacts, Calendar and Journal in one terminal
 window, following HEY live. This page is the reference for how it starts, how to get
-around it, and what each key does. Press `?` inside the app for the shortcut bar.
+around it, and what each key does. Press `?` inside the app for the full keyboard help.
 
 ## Starting it
 
@@ -23,9 +23,22 @@ manually launched TUIs.
 ## Getting around
 
 The app has four sections: Mail, Contacts, Calendar and Journal. The context-sensitive
-shortcut bar is visible by default; press `?` to hide or restore it, and the choice is
-remembered across restarts. While it is hidden, `? help` at the left of the top bar says
-how to bring it back.
+shortcut footer stays on one line, showing the most useful actions for the current
+screen. The help hint stays visible even while a notice is shown. Press `?` to open a modal with the complete context-sensitive keyboard help,
+or **F1** while typing in a form, search or find prompt (where `?` stays text).
+Help includes paging and context-appropriate section and box navigation. It uses two
+columns when there is room and a single column in smaller terminals. On very short
+terminals it drops the frame to keep the shortcuts visible.
+Use Up/Down or PgUp/PgDn to scroll the help, and Escape, `q`, `?` or F1 to close it
+without changing the screen underneath. F1 also works in pickers and error dialogs.
+The former hidden-help preference no longer hides the compact footer.
+
+Mail lists show one line per thread, with a truncated sender, subject and
+right-aligned date. Dates omit the year when it is the current year in your local
+time zone. This layout applies across boxes, labels, collections, searches,
+bundles, Previously Seen and a contact's thread list. The Screener shows the
+sender's name, address, subject and date on one line; history shows the sender and
+screening decision. Email bodies and forms keep their usual layout.
 
 Mail navigation includes HEY's boxes plus separate Labels and Collections tabs: Shift+L
 opens Labels directly and Shift+K opens Collections. Previously Seen has its own tab after
@@ -46,7 +59,7 @@ uppercase belongs to Labels:
 
 | Key | Action |
 |---|---|
-| `/` or `s` | search |
+| `/` or `s` | search email from the mail list |
 | `r` | reply |
 | `f` | forward |
 | `v` | move |
@@ -77,6 +90,29 @@ view a note is headed "Note by …" and a share notice "… shared this thread",
 emailed, instead of with the sender's name.
 
 A thread opens on its latest message; `k` steps back through the ones before it and `j` forward again.
+
+While reading a thread, `/` opens a find prompt for its loaded message bodies. Type a
+word or phrase and press Enter for a case-insensitive literal search of the rendered
+text, including displayed link destinations. Phrases can cross prose wraps, and URL
+searches can cross link wraps. Table cells are searched within each displayed line.
+Matches are highlighted; the first match
+at or below the current scroll position is selected, wrapping to the top if needed.
+`n` and `N` move to the next and previous matches, wrapping at either end. The footer
+shows the query and match count, or says there are no matches. Dense searches have
+a bounded result set; the footer says `limited` when the scan reaches its limit.
+Refine the query to narrow those results. A match inside a link
+selects that destination for Enter to open after it is shown in full in the link footer.
+Headers, attachments and images are outside this search, and finding text makes no
+network requests.
+
+Escape cancels editing a find query and keeps the previous search. Outside the prompt,
+Escape clears the search; another Escape returns to the list. Enter on an empty query
+also clears the search. `/` edits the query again.
+
+From the mail list, `/` or `s` searches email and `n` manages collections. In an open
+thread, `/` finds body text and `s` saves the selected attachment. Enter opens the
+selected link, or the selected attachment when no link is selected, even while a find
+query is active.
 
 Sending a reply or a forward from a thread closes the thread and returns you to the list you opened it from — the Imbox, a search, a bundle. A send that fails keeps the form open — except one HEY refused and kept as a draft (usually the account's sending limit): that closes the form, since sending again would only make another draft, and says "Not sent" with the draft it was saved as. An address HEY would not deliver to keeps the form open too: the form names it (`Not a valid email address: a`) rather than sending a message HEY would quietly keep as a draft, or send without that recipient.
 
@@ -187,6 +223,12 @@ Space opens a bigger preview of the selected sender's most recent email: the who
 not just the first line the list has room for. Arrow keys and PgUp/PgDn scroll it, `y` and
 `n` answer for that sender straight from it, and Space or Escape closes it again. Opening a
 preview only reads the email; it doesn't screen the sender or tell them anything.
+
+The preview supports the same `/` find prompt and `n`/`N` match navigation as the thread
+view. While a query is active, `n` finds the next match instead of screening the sender
+out; the help bar shows this change. Escape clears the query and restores screening
+keys, and another Escape closes the preview. `y` still screens the sender in after the
+query has been submitted. While typing in the prompt, letters and spaces enter text.
 
 ## Imbox cover art
 
